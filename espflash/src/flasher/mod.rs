@@ -27,16 +27,12 @@ use crate::{
     command::{Command, CommandType},
     connection::{
         reset::{ResetAfterOperation, ResetBeforeOperation},
-        Connection,
-        Port,
+        Connection, Port,
     },
     elf::{ElfFirmwareImage, FirmwareImage, RomSegment},
     error::{ConnectionError, ResultExt},
     flasher::stubs::{
-        FlashStub,
-        CHIP_DETECT_MAGIC_REG_ADDR,
-        DEFAULT_TIMEOUT,
-        EXPECTED_STUB_HANDSHAKE,
+        FlashStub, CHIP_DETECT_MAGIC_REG_ADDR, DEFAULT_TIMEOUT, EXPECTED_STUB_HANDSHAKE,
     },
 };
 use crate::{
@@ -1174,6 +1170,7 @@ impl Flasher {
                 let response = connection.command(crate::command::Command::GetSecurityInfo)?;
                 // Extract raw bytes and convert them into `SecurityInfo`
                 if let crate::connection::CommandResponseValue::Vector(data) = response {
+                    println!("{:?}", data);
                     SecurityInfo::try_from(data)
                 } else {
                     Err(Error::InvalidResponse)
