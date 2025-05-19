@@ -4,8 +4,10 @@
 //! possible to write an application to and boot from RAM, where a bootloader is
 //! obviously not required either.
 
-use std::collections::HashMap;
+use std::{borrow::Cow, collections::HashMap};
 
+#[cfg(feature = "serialport")]
+use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 use strum::{Display, EnumIter, EnumString, VariantNames};
 
@@ -23,8 +25,13 @@ use self::{
 };
 use crate::{
     Error,
-    flasher::{FlashData, FlashFrequency},
-    image_format::IdfBootloaderFormat,
+    connection::ConnectionError,
+    flasher::{
+        FlashData,
+        FlashFrequency,
+        stubs::{EXPECTED_STUB_HANDSHAKE, FlashStub},
+    },
+    image_format::{IdfBootloaderFormat, Segment},
 };
 #[cfg(feature = "serialport")]
 use crate::{
@@ -194,6 +201,94 @@ impl Chip {
     ) -> Box<dyn FlashTarget> {
         Box::new(RamTarget::new(entry, max_ram_block_size))
     }
+
+    fn load_stub(&mut self, connection: &mut Connection, use_stub: bool) -> Result<(), Error> {
+        debug!("Loading flash stub for chip: {:?}", self);
+
+        // Load flash stub
+        let stub = FlashStub::get(self);
+
+        let mut ram_target = self.ram_target(
+            Some(stub.entry()),
+            self.into_target().max_ram_block_size(connection)?,
+        );
+        ram_target.begin(connection).flashing()?;
+
+        let (text_addr, text) = stub.text();
+        debug!("Write {} byte stub text", text.len());
+
+        ram_target
+            .write_segment(
+                connection,
+                Segment {
+                    addr: text_addr,
+                    data: Cow::Borrowed(&text),
+                },
+                &mut None,
+            )
+            .flashing()?;
+
+        let (data_addr, data) = stub.data();
+        debug!("Write {} byte stub data", data.len());
+
+        ram_target
+            .write_segment(
+                connection,
+                Segment {
+                    addr: data_addr,
+                    data: Cow::Borrowed(&data),
+                },
+                &mut None,
+            )
+            .flashing()?;
+
+        debug!("Finish stub write");
+        ram_target.finish(connection, true).flashing()?;
+
+        debug!("Stub written!");
+
+        match connection.read(EXPECTED_STUB_HANDSHAKE.len())? {
+            Some(resp) if resp == EXPECTED_STUB_HANDSHAKE.as_bytes() => Ok(()),
+            _ => Err(Error::Connection(ConnectionError::InvalidStubHandshake)),
+        }?;
+
+        // Re-detect chip to check stub is up
+        let chip = detect_chip(connection, use_stub)?;
+        debug!("Re-detected chip: {:?}", chip);
+
+        Ok(())
+    }
+
+    /// Load an ELF image to RAM and execute it
+    ///
+    /// Note that this will not touch the flash on the device
+    pub fn load_elf_to_ram(
+        &mut self,
+        elf_data: &[u8],
+        mut progress: Option<&mut dyn ProgressCallbacks>,
+        mut connection: Connection,
+    ) -> Result<(), Error> {
+        let elf = ElfFile::parse(elf_data)?;
+        if rom_segments(self, &elf).next().is_some() {
+            return Err(Error::ElfNotRamLoadable);
+        }
+
+        let mut target = self.ram_target(
+            Some(elf.elf_header().e_entry.get(Endianness::Little)),
+            self.into_target().max_ram_block_size(&mut connection)?,
+        );
+        target.begin(&mut connection).flashing()?;
+
+        for segment in ram_segments(self, &elf) {
+            target
+                .write_segment(&mut connection, segment, &mut progress)
+                .flashing()?;
+        }
+
+        target.finish(&mut connection, true).flashing()
+    }
+
+    
 }
 
 impl TryFrom<u16> for Chip {
